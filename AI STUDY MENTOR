@@ -1,0 +1,172 @@
+import java.util.*;
+import java.io.*;
+
+public class AIStudyMentor {
+    static class Card {
+        String q, a, src;
+        Card(String q, String a, String src){ this.q=q; this.a=a; this.src=src; }
+    }
+
+    static final String FLASHCARDS_FILE = "flashcards.csv";
+    static final String NOTES_FILE = "notes.txt";
+    static final Set<String> STOP = new HashSet<>(Arrays.asList(
+        "the","a","an","and","or","but","of","to","in","on","for","by","is","are","was","were","be","been",
+        "with","as","at","from","that","this","it","its","into","about","we","you","they","i","he","she","their",
+        "his","her","our","your","not","can","could","may","might","will","would","shall","should","do","does","did"
+    ));
+
+    public static void main(String[] args) {
+        List<Card> deck = new ArrayList<>();
+        deck.addAll(loadFlashcards(FLASHCARDS_FILE));
+        deck.addAll(buildClozeFromNotes(NOTES_FILE, 15)); // up to 15 auto cloze Qs
+
+        if (deck.isEmpty()) {
+            System.out.println("No cards found. Add flashcards to flashcards.csv or notes to notes.txt");
+            return;
+        }
+
+        // Shuffle and quiz
+        Collections.shuffle(deck);
+        Scanner sc = new Scanner(System.in);
+        int score = 0;
+        Map<String,Integer> wrongTerms = new HashMap<>();
+
+        System.out.println("\n===== AI STUDY MENTOR QUIZ =====");
+        for (int i=0;i<deck.size();i++){
+            Card c = deck.get(i);
+            System.out.println("\nQ"+(i+1)+": " + c.q + (c.src!=null ? "  [src: "+c.src+"]" : ""));
+            System.out.print("Your answer (or type 'hint'): ");
+            String ans = sc.nextLine().trim();
+
+            if (ans.equalsIgnoreCase("hint")) {
+                String hint = c.a.isEmpty()? "" : (c.a.charAt(0)+"___");
+                System.out.println("Hint: " + hint);
+                System.out.print("Answer: ");
+                ans = sc.nextLine().trim();
+            }
+
+            if (equalsLoose(ans, c.a)) {
+                System.out.println("✅ Correct!");
+                score++;
+            } else {
+                System.out.println("❌ Correct answer: " + c.a);
+                String key = c.a.toLowerCase();
+                wrongTerms.put(key, wrongTerms.getOrDefault(key,0)+1);
+            }
+        }
+
+        System.out.println("\n===== RESULT =====");
+        System.out.println("Score: " + score + " / " + deck.size());
+        if (!wrongTerms.isEmpty()){
+            System.out.println("Revise these terms:");
+            List<Map.Entry<String,Integer>> list = new ArrayList<>(wrongTerms.entrySet());
+            list.sort((a,b)->b.getValue()-a.getValue());
+            for (var e : list) System.out.println(" • " + e.getKey() + " (missed " + e.getValue() + "x)");
+        }
+        System.out.println("==================");
+        sc.close();
+    }
+
+    // Reads CSV: question,answer
+    static List<Card> loadFlashcards(String path){
+        List<Card> out = new ArrayList<>();
+        File f = new File(path);
+        if (!f.exists()) return out;
+        try (BufferedReader br = new BufferedReader(new FileReader(f))){
+            String line = br.readLine(); // optional header
+            while ((line = br.readLine()) != null){
+                String[] p = parseCSV(line);
+                if (p.length>=2){
+                    out.add(new Card(p[0], p[1], "flashcards"));
+                }
+            }
+            System.out.println("Loaded flashcards: " + out.size());
+        } catch(Exception e){ System.out.println("Error reading flashcards: " + e.getMessage()); }
+        return out;
+    }
+
+    // Build cloze questions from sentences in notes.txt by blanking key terms
+    static List<Card> buildClozeFromNotes(String path, int maxQuestions){
+        List<Card> out = new ArrayList<>();
+        File f = new File(path);
+        if (!f.exists()) return out;
+
+        String text = readAll(path);
+        if (text.trim().isEmpty()) return out;
+
+        // Split into sentences
+        String[] sentences = text.replace('\n',' ').split("(?<=[.!?])\\s+");
+        // Count term frequencies
+        Map<String,Integer> freq = new HashMap<>();
+        Map<String,List<String>> termToSent = new HashMap<>();
+
+        for (String s : sentences){
+            String[] words = s.replaceAll("[^A-Za-z0-9 ]"," ").toLowerCase().split("\\s+");
+            Set<String> seenInSentence = new HashSet<>();
+            for (String w : words){
+                if (w.isEmpty() || STOP.contains(w) || w.length()<3) continue;
+                if (!seenInSentence.contains(w)){
+                    freq.put(w, freq.getOrDefault(w,0)+1);
+                    seenInSentence.add(w);
+                }
+            }
+            for (String w : seenInSentence){
+                termToSent.computeIfAbsent(w,k->new ArrayList<>()).add(s);
+            }
+        }
+
+        // Pick top terms
+        List<Map.Entry<String,Integer>> list = new ArrayList<>(freq.entrySet());
+        list.sort((a,b)->b.getValue()-a.getValue());
+
+        int made = 0;
+        for (var e : list){
+            if (made>=maxQuestions) break;
+            String term = e.getKey();
+            List<String> host = termToSent.get(term);
+            if (host==null || host.isEmpty()) continue;
+            String sent = host.get(0);
+            // Create cloze by replacing one case-insensitive occurrence
+            String cloze = sent.replaceAll("(?i)\\b"+PatternQuote(term)+"\\b", "_____");
+            if (cloze.equals(sent)) continue;
+            String hint = term.substring(0,1) + "___";
+            out.add(new Card(cloze + "  (hint: "+hint+")", term, "notes"));
+            made++;
+        }
+        System.out.println("Built cloze from notes: " + out.size());
+        return out;
+    }
+
+    static String readAll(String path){
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new FileReader(path))){
+            String line; while ((line = br.readLine()) != null) sb.append(line).append('\n');
+        } catch(Exception e){ System.out.println("Error reading notes: " + e.getMessage()); }
+        return sb.toString();
+    }
+
+    // CSV helpers
+    static String[] parseCSV(String line){
+        List<String> out = new ArrayList<>();
+        boolean inQ=false; StringBuilder sb=new StringBuilder();
+        for (int i=0;i<line.length();i++){
+            char c=line.charAt(i);
+            if (c=='"'){ inQ=!inQ; }
+            else if (c==',' && !inQ){ out.add(sb.toString()); sb.setLength(0); }
+            else sb.append(c);
+        }
+        out.add(sb.toString());
+        return out.toArray(new String[0]);
+    }
+
+    static boolean equalsLoose(String a, String b){
+        if (a==null||b==null) return false;
+        String x=a.trim().toLowerCase(), y=b.trim().toLowerCase();
+        // accept if exact or if answer is contained (helps for short terms)
+        return x.equals(y) || x.replaceAll("\\s+","").equals(y.replaceAll("\\s+","")) || x.contains(y) || y.contains(x);
+    }
+
+    static String PatternQuote(String s){
+        return s.replaceAll("([\\\\.\\[\\]\\(\\)\\{\\}\\^\\$\\|\\?\\*\\+])","\\\\$1");
+    }
+}
